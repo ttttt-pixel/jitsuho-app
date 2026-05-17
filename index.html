@@ -1100,119 +1100,27 @@ function PrintTab({state}){
 function App(){
   const [state,setState]=useState(loadFromLS);
   const [tab,setTab]=useState('home');
-  const [fileHandle,setFileHandle]=useState(null);
-  // 'init'=起動中 'none'=未設定 'ready'=接続済み 'perm'=許可待ち 'nosup'=非対応
-  const [fileStatus,setFileStatus]=useState('init');
-  const [fileName,setFileName]=useState('');
+  const [savedAt,setSavedAt]=useState('');
   const [msg,setMsg]=useState('');
-  const pendingHandle=useRef(null);
 
-  // 起動時：IndexedDBからハンドルを取得して自動読み込み
+  // 入力のたびにlocalStorageへ自動保存
   useEffect(()=>{
-    (async()=>{
-      if(!FSA_SUPPORTED){setFileStatus('nosup');return;}
-      const result=await tryAutoLoad();
-      if(!result){setFileStatus('none');return;}
-      if(result.needsPermission){
-        pendingHandle.current=result.handle;
-        setFileStatus('perm');
-        return;
-      }
-      setFileHandle(result.handle);
-      setFileName(result.handle.name);
-      setState(result.state);
-      setFileStatus('ready');
-    })();
-  },[]);
-
-  // データ変更時にlocalStorageへキャッシュ（フォールバック用）
-  useEffect(()=>{
-    if(fileStatus==='init')return;
-    try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));}catch{}
-  },[state,fileStatus]);
+    try{
+      localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
+      const t=new Date();
+      setSavedAt(t.getHours().toString().padStart(2,'0')+':'+t.getMinutes().toString().padStart(2,'0'));
+    }catch(e){setMsg('⚠️ 保存失敗: '+e.message);}
+  },[state]);
 
   function showMsg(text){setMsg(text);setTimeout(()=>setMsg(''),4000);}
 
-  // 保存
-  async function handleSave(){
-    if(FSA_SUPPORTED){
-      try{
-        let handle=fileHandle;
-        if(!handle){
-          handle=await pickSaveFile();
-          await idbSet('csvHandle',handle);
-          setFileHandle(handle);
-          setFileName(handle.name);
-          setFileStatus('ready');
-        }
-        await writeToHandle(handle,state);
-        showMsg('✅ '+handle.name+' に保存しました');
-      }catch(e){
-        if(e.name!=='AbortError')showMsg('⚠️ 保存失敗: '+e.message);
-      }
-    }else{
-      // iOS Safari などFSA非対応：CSVをダウンロード
-      downloadCsv(state);
-      showMsg('📥 CSVをダウンロードしました。ファイルを保管してください');
-    }
+  // CSVバックアップ書き出し
+  function handleExportCsv(){
+    downloadCsv(state);
+    showMsg('📥 CSVをダウンロードしました');
   }
 
-  // 既存CSVを開く
-  async function handleOpenFile(){
-    if(!FSA_SUPPORTED)return handleImportCsv();
-    try{
-      const handle=await pickOpenFile();
-      const file=await handle.getFile();
-      const text=await file.text();
-      const loaded=fromCsv(text);
-      if(confirm('「'+handle.name+'」を読み込みます。現在のデータは上書きされます。よろしいですか？')){
-        await idbSet('csvHandle',handle);
-        setFileHandle(handle);
-        setFileName(handle.name);
-        setState(loaded);
-        setFileStatus('ready');
-        showMsg('✅ '+handle.name+' を読み込みました');
-      }
-    }catch(e){
-      if(e.name!=='AbortError')showMsg('⚠️ 読み込み失敗: '+e.message);
-    }
-  }
-
-  // 新規CSVファイルを作成
-  async function handleNewFile(){
-    if(!FSA_SUPPORTED){showMsg('このブラウザは非対応です');return;}
-    try{
-      const handle=await pickSaveFile();
-      await writeToHandle(handle,state);
-      await idbSet('csvHandle',handle);
-      setFileHandle(handle);
-      setFileName(handle.name);
-      setFileStatus('ready');
-      showMsg('✅ '+handle.name+' を作成しました');
-    }catch(e){
-      if(e.name!=='AbortError')showMsg('⚠️ 失敗: '+e.message);
-    }
-  }
-
-  // 許可を再要求して読み込み
-  async function handleRequestPerm(){
-    const handle=pendingHandle.current;
-    if(!handle)return;
-    const result=await requestPermission(handle);
-    if(result){
-      await idbSet('csvHandle',handle);
-      setFileHandle(handle);
-      setFileName(handle.name);
-      setState(result);
-      setFileStatus('ready');
-      showMsg('✅ '+handle.name+' を読み込みました');
-    }else{
-      showMsg('⚠️ アクセスが拒否されました');
-      setFileStatus('none');
-    }
-  }
-
-  // CSVインポート（FSA非対応ブラウザ用）
+  // CSVから復元
   function handleImportCsv(){
     const inp=document.createElement('input');
     inp.type='file';inp.accept='.csv';
@@ -1243,49 +1151,18 @@ function App(){
     {id:'print',  label:'印刷',   icon:'🖨️'},
   ];
 
-  // ステータスバー
-  function StatusBar(){
-    if(fileStatus==='init')return null;
-    if(fileStatus==='ready')return(
-      <div className="no-print bg-green-900 text-green-200 text-xs px-3 py-1 flex items-center gap-2">
-        <span>📄 {fileName}</span>
-        <span className="ml-auto opacity-60">自動保存: 保存ボタンで上書き</span>
-      </div>
-    );
-    if(fileStatus==='perm')return(
-      <div className="no-print bg-yellow-600 text-white text-xs px-3 py-1.5 flex items-center gap-2">
-        <span className="flex-1">前回のファイルが見つかりました。アクセスを許可してください。</span>
-        <button onClick={handleRequestPerm} className="bg-white text-yellow-700 font-bold px-2 py-0.5 rounded">読み込む</button>
-      </div>
-    );
-    if(fileStatus==='none')return(
-      <div className="no-print bg-blue-700 text-white text-xs px-3 py-1.5 flex items-center gap-2">
-        <span className="flex-1">💾 保存ファイルを設定してください</span>
-        <button onClick={handleNewFile} className="bg-white text-blue-700 font-bold px-2 py-0.5 rounded mr-1">新規作成</button>
-        <button onClick={handleOpenFile} className="bg-white text-blue-700 font-bold px-2 py-0.5 rounded">既存を開く</button>
-      </div>
-    );
-    if(fileStatus==='nosup')return(
-      <div className="no-print bg-orange-600 text-white text-xs px-3 py-1 flex items-center gap-2">
-        <span className="flex-1">⚠️ このブラウザは自動保存非対応。「保存」でCSVをダウンロード後、保管してください。</span>
-        <button onClick={handleImportCsv} className="bg-white text-orange-700 font-bold px-2 py-0.5 rounded">CSV読込</button>
-      </div>
-    );
-    return null;
-  }
-
   return(
     <div className="flex flex-col min-h-screen max-w-2xl mx-auto bg-gray-100">
       <header className="no-print bg-green-800 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-40 shadow">
-        <h1 className="font-bold text-lg tracking-wide">🔫 実包使用記録</h1>
+        <div>
+          <h1 className="font-bold text-lg tracking-wide">🔫 実包使用記録</h1>
+          {savedAt&&<div className="text-green-300 text-[10px]">✓ 自動保存済み {savedAt}</div>}
+        </div>
         <div className="flex gap-2">
-          {fileStatus==='ready'&&(
-            <button onClick={handleOpenFile} className="text-xs bg-green-700 px-2 py-1.5 rounded-lg">ファイル変更</button>
-          )}
-          <button onClick={handleSave} className="text-xs bg-yellow-400 text-yellow-900 font-bold px-3 py-1.5 rounded-lg active:bg-yellow-300">💾 保存</button>
+          <button onClick={handleImportCsv} className="text-xs bg-green-700 px-2 py-1.5 rounded-lg active:bg-green-600">CSV読込</button>
+          <button onClick={handleExportCsv} className="text-xs bg-yellow-400 text-yellow-900 font-bold px-3 py-1.5 rounded-lg active:bg-yellow-300">CSVバックアップ</button>
         </div>
       </header>
-      <StatusBar/>
       {msg&&<div className="no-print bg-white border-b text-sm px-4 py-2 text-center text-gray-700">{msg}</div>}
 
       <main className="flex-1 overflow-y-auto pb-20 no-print">
