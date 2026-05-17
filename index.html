@@ -1,0 +1,1319 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>実包使用記録</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+*{box-sizing:border-box;}
+body{margin:0;font-family:'Hiragino Sans','Yu Gothic','Meiryo',sans-serif;background:#f3f4f6;}
+@media print{
+  @page{size:A4 landscape;margin:8mm;}
+  .no-print{display:none!important;}
+  .print-show{display:block!important;}
+  body{background:white;}
+  .print-page{page-break-after:always;width:100%;}
+  .print-page:last-child{page-break-after:avoid;}
+}
+.print-show{display:none;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef} = React;
+
+const STORAGE_KEY = 'jitsuho_v5';
+const AMMO_TYPES = ['散弾','単弾12番','単弾20番'];
+const PURPOSES = ['狩猟','有害鳥獣駆除'];
+const TARGETS = ['ニホンジカ','キツネ','カラス','ヒグマ'];
+const GENDERS = ['雄','雌','不明'];
+
+const genId = () => Date.now().toString(36)+Math.random().toString(36).substr(2,5);
+
+const DEFAULT = {
+  personalInfo:{name:'',postalCode:'',address:'',phone:'',licenseNumber:'',licenseType:'第一種',licenseExpiry:'',huntingAssociation:''},
+  guns:[],ranges:[],stores:[],
+  huntRecords:[],shootRecords:[],buyRecords:[],
+  carryOver:{'散弾':0,'単弾12番':0,'単弾20番':0}
+};
+
+function mergeState(p){
+  return{...DEFAULT,...p,carryOver:{...DEFAULT.carryOver,...(p.carryOver||{})}};
+}
+
+function loadFromLS(){
+  try{
+    const s=localStorage.getItem(STORAGE_KEY);
+    if(!s)return DEFAULT;
+    return mergeState(JSON.parse(s));
+  }catch{return DEFAULT;}
+}
+
+function calcInv(state){
+  const inv={...state.carryOver};
+  AMMO_TYPES.forEach(t=>{inv[t]=Number(inv[t])||0;});
+  state.buyRecords.forEach(r=>{inv[r.ammoType]=(inv[r.ammoType]||0)+( Number(r.qty)||0);});
+  state.huntRecords.forEach(r=>{inv[r.ammoType]=(inv[r.ammoType]||0)-(Number(r.ammoUsed)||0);});
+  state.shootRecords.forEach(r=>{inv[r.ammoType]=(inv[r.ammoType]||0)-(Number(r.ammoUsed)||0);});
+  return inv;
+}
+
+// ──────────────────────────────────────────
+// CSV エンコード / デコード
+// ──────────────────────────────────────────
+function csvEsc(v){
+  const s=String(v===null||v===undefined?'':v);
+  return(s.includes(',')||s.includes('"')||s.includes('\n'))?'"'+s.replace(/"/g,'""')+'"':s;
+}
+function csvRow(arr){return arr.map(csvEsc).join(',');}
+
+function toCsv(state){
+  const p=state.personalInfo;
+  const lines=[
+    '##PERSONAL',
+    csvRow(['name','postalCode','address','phone','licenseNumber','licenseType','licenseExpiry','huntingAssociation']),
+    csvRow([p.name,p.postalCode,p.address,p.phone,p.licenseNumber,p.licenseType,p.licenseExpiry,p.huntingAssociation]),
+    '',
+    '##CARRY_OVER',
+    csvRow(['散弾','単弾12番','単弾20番']),
+    csvRow([state.carryOver['散弾']||0,state.carryOver['単弾12番']||0,state.carryOver['単弾20番']||0]),
+    '',
+    '##GUNS',
+    csvRow(['id','number','type','caliber','registrationNumber','acquiredDate']),
+    ...state.guns.map(g=>csvRow([g.id,g.number,g.type||'',g.caliber||'',g.registrationNumber||'',g.acquiredDate||''])),
+    '',
+    '##RANGES',
+    csvRow(['id','name','address']),
+    ...state.ranges.map(r=>csvRow([r.id,r.name,r.address||''])),
+    '',
+    '##STORES',
+    csvRow(['id','name','address']),
+    ...state.stores.map(s=>csvRow([s.id,s.name,s.address||''])),
+    '',
+    '##HUNT_RECORDS',
+    csvRow(['id','date','purpose','target','captureCount','gender','location','meshNumber','gunId','ammoType','ammoUsed','note']),
+    ...state.huntRecords.map(r=>csvRow([r.id,r.date,r.purpose,r.target,r.captureCount,r.gender,r.location,r.meshNumber,r.gunId||'',r.ammoType,r.ammoUsed,r.note||''])),
+    '',
+    '##SHOOT_RECORDS',
+    csvRow(['id','date','rangeId','gunId','ammoType','ammoUsed','note']),
+    ...state.shootRecords.map(r=>csvRow([r.id,r.date,r.rangeId||'',r.gunId||'',r.ammoType,r.ammoUsed,r.note||''])),
+    '',
+    '##BUY_RECORDS',
+    csvRow(['id','date','storeId','ammoType','qty','note']),
+    ...state.buyRecords.map(r=>csvRow([r.id,r.date,r.storeId||'',r.ammoType,r.qty,r.note||''])),
+  ];
+  return '﻿'+lines.join('\r\n'); // BOM付きUTF-8（Excel対応）
+}
+
+function parseCsvLine(line){
+  const result=[];let cur='';let inQ=false;
+  for(let i=0;i<line.length;i++){
+    if(inQ){if(line[i]==='"'){if(line[i+1]==='"'){cur+='"';i++;}else inQ=false;}else cur+=line[i];}
+    else{if(line[i]==='"')inQ=true;else if(line[i]===','){result.push(cur);cur='';}else cur+=line[i];}
+  }
+  result.push(cur);return result;
+}
+
+function fromCsv(text){
+  const sections={};let sec=null;
+  const lines=text.replace(/^﻿/,'').split(/\r?\n/);
+  for(const raw of lines){
+    const line=raw.trim();
+    if(!line)continue;
+    if(line.startsWith('##')){sec=line.slice(2);sections[sec]={h:null,rows:[]};}
+    else if(sec){
+      const f=parseCsvLine(line);
+      if(!sections[sec].h)sections[sec].h=f;
+      else sections[sec].rows.push(f);
+    }
+  }
+  function obj(sec,row){
+    const h=sections[sec]?.h||[];
+    return Object.fromEntries(h.map((k,i)=>[k,row[i]||'']));
+  }
+  const st={...DEFAULT};
+  if(sections.PERSONAL?.rows?.[0]){
+    const o=obj('PERSONAL',sections.PERSONAL.rows[0]);
+    st.personalInfo={...DEFAULT.personalInfo,...o};
+  }
+  if(sections.CARRY_OVER?.rows?.[0]){
+    const r=sections.CARRY_OVER.rows[0];
+    const h=sections.CARRY_OVER.h||[];
+    const co={};h.forEach((k,i)=>{co[k]=Number(r[i])||0;});
+    st.carryOver={...DEFAULT.carryOver,...co};
+  }
+  if(sections.GUNS?.rows)st.guns=sections.GUNS.rows.map(r=>obj('GUNS',r));
+  if(sections.RANGES?.rows)st.ranges=sections.RANGES.rows.map(r=>obj('RANGES',r));
+  if(sections.STORES?.rows)st.stores=sections.STORES.rows.map(r=>obj('STORES',r));
+  if(sections.HUNT_RECORDS?.rows)st.huntRecords=sections.HUNT_RECORDS.rows.map(r=>{
+    const o=obj('HUNT_RECORDS',r);
+    return{...o,captureCount:Number(o.captureCount)||0,ammoUsed:Number(o.ammoUsed)||0};
+  });
+  if(sections.SHOOT_RECORDS?.rows)st.shootRecords=sections.SHOOT_RECORDS.rows.map(r=>{
+    const o=obj('SHOOT_RECORDS',r);
+    return{...o,ammoUsed:Number(o.ammoUsed)||0};
+  });
+  if(sections.BUY_RECORDS?.rows)st.buyRecords=sections.BUY_RECORDS.rows.map(r=>{
+    const o=obj('BUY_RECORDS',r);
+    return{...o,qty:Number(o.qty)||0};
+  });
+  return st;
+}
+
+// ──────────────────────────────────────────
+// File System Access API + IndexedDB
+// ──────────────────────────────────────────
+const FSA_SUPPORTED = typeof window.showSaveFilePicker==='function';
+const IDB_DB='jitsuho_fsa_v1';const IDB_STORE='handles';
+
+function idbOpen(){
+  return new Promise((res,rej)=>{
+    const req=indexedDB.open(IDB_DB,1);
+    req.onupgradeneeded=e=>e.target.result.createObjectStore(IDB_STORE);
+    req.onsuccess=e=>res(e.target.result);
+    req.onerror=()=>rej(req.error);
+  });
+}
+async function idbGet(key){
+  try{const db=await idbOpen();return new Promise(res=>{const tx=db.transaction(IDB_STORE,'readonly');const r=tx.objectStore(IDB_STORE).get(key);r.onsuccess=()=>res(r.result??null);r.onerror=()=>res(null);});}
+  catch{return null;}
+}
+async function idbSet(key,val){
+  try{const db=await idbOpen();return new Promise(res=>{const tx=db.transaction(IDB_STORE,'readwrite');tx.objectStore(IDB_STORE).put(val,key);tx.oncomplete=()=>res();tx.onerror=()=>res();});}
+  catch{}
+}
+
+async function tryAutoLoad(){
+  if(!FSA_SUPPORTED)return null;
+  const handle=await idbGet('csvHandle');
+  if(!handle)return null;
+  try{
+    const perm=await handle.queryPermission({mode:'readwrite'});
+    if(perm!=='granted')return{needsPermission:true,handle};
+    const file=await handle.getFile();
+    const text=await file.text();
+    return{state:fromCsv(text),handle};
+  }catch{return null;}
+}
+
+async function requestPermission(handle){
+  try{
+    const perm=await handle.requestPermission({mode:'readwrite'});
+    if(perm!=='granted')return false;
+    const file=await handle.getFile();
+    const text=await file.text();
+    return fromCsv(text);
+  }catch{return false;}
+}
+
+async function writeToHandle(handle,state){
+  const w=await handle.createWritable();
+  await w.write(toCsv(state));
+  await w.close();
+}
+
+async function pickSaveFile(){
+  const handle=await window.showSaveFilePicker({
+    suggestedName:'実包記録.csv',
+    types:[{description:'CSVファイル',accept:{'text/csv':['.csv']}}]
+  });
+  return handle;
+}
+
+async function pickOpenFile(){
+  const [handle]=await window.showOpenFilePicker({
+    types:[{description:'CSVファイル',accept:{'text/csv':['.csv']}}]
+  });
+  return handle;
+}
+
+function downloadCsv(state){
+  const blob=new Blob([toCsv(state)],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=`実包記録_${new Date().toISOString().split('T')[0]}.csv`;
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function Modal({title,onClose,children}){
+  return(
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={onClose}>
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[90vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b sticky top-0 bg-white">
+          <h2 className="font-bold text-base">{title}</h2>
+          <button onClick={onClose} className="text-gray-400 text-2xl leading-none w-8 h-8 flex items-center justify-center">×</button>
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Inp({label,hint,...props}){
+  return(
+    <div className="mb-3">
+      <label className="block text-xs text-gray-500 mb-1">{label}{hint&&<span className="text-gray-400 ml-1">{hint}</span>}</label>
+      <input className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500" {...props}/>
+    </div>
+  );
+}
+
+function Sel({label,options,...props}){
+  return(
+    <div className="mb-3">
+      <label className="block text-xs text-gray-500 mb-1">{label}</label>
+      <select className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:border-blue-500" {...props}>
+        {options.map(o=>{
+          const v=typeof o==='string'?o:o.value;
+          const l=typeof o==='string'?o:o.label;
+          return <option key={v} value={v}>{l}</option>;
+        })}
+      </select>
+    </div>
+  );
+}
+
+function Btn({children,variant='primary',className='',onClick,type='button'}){
+  const base='py-2 px-4 rounded-lg text-sm font-medium transition-colors ';
+  const v={
+    primary:'bg-green-700 text-white active:bg-green-800',
+    secondary:'bg-gray-100 text-gray-700 active:bg-gray-200',
+    danger:'bg-red-500 text-white active:bg-red-600',
+    outline:'border border-gray-300 text-gray-600 active:bg-gray-100'
+  };
+  return <button type={type} onClick={onClick} className={base+(v[variant]||v.primary)+' '+className}>{children}</button>;
+}
+
+// ──────────────────────────────────────────
+// HOME TAB
+// ──────────────────────────────────────────
+function HomeTab({state}){
+  const inv=calcInv(state);
+  const recent=[...state.huntRecords].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,5);
+  const totalCapture=state.huntRecords.reduce((s,r)=>s+(Number(r.captureCount)||0),0);
+  const totalAmmo=state.huntRecords.reduce((s,r)=>s+(Number(r.ammoUsed)||0),0)+state.shootRecords.reduce((s,r)=>s+(Number(r.ammoUsed)||0),0);
+
+  function invCard(t){
+    const n=inv[t];
+    const border=n<=0?'border-red-400':n<=20?'border-yellow-400':'border-green-400';
+    const bg=n<=0?'bg-red-50':n<=20?'bg-yellow-50':'bg-green-50';
+    const txt=n<=0?'text-red-600':n<=20?'text-yellow-600':'text-green-700';
+    const tag=n<=0?'🔴在庫切れ':n<=20?'🟡残りわずか':'🟢正常';
+    return(
+      <div key={t} className={`border-2 ${border} ${bg} rounded-xl p-3`}>
+        <div className="text-xs text-gray-500 mb-1">{t}</div>
+        <div className={`text-2xl font-bold ${txt}`}>{n}<span className="text-sm ml-1">発</span></div>
+        <div className="text-xs mt-1">{tag}</div>
+      </div>
+    );
+  }
+
+  return(
+    <div className="p-4 space-y-4">
+      <div className="grid grid-cols-3 gap-2">
+        <div className="bg-white rounded-xl p-3 text-center border">
+          <div className="text-2xl font-bold text-green-700">{state.huntRecords.length}</div>
+          <div className="text-xs text-gray-500">狩猟記録</div>
+        </div>
+        <div className="bg-white rounded-xl p-3 text-center border">
+          <div className="text-2xl font-bold text-green-700">{totalCapture}</div>
+          <div className="text-xs text-gray-500">総捕獲数</div>
+        </div>
+        <div className="bg-white rounded-xl p-3 text-center border">
+          <div className="text-2xl font-bold text-green-700">{totalAmmo}</div>
+          <div className="text-xs text-gray-500">総消費弾</div>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="font-bold text-gray-700 text-sm mb-2">在庫状況</h3>
+        <div className="grid grid-cols-3 gap-2">{AMMO_TYPES.map(invCard)}</div>
+      </div>
+
+      {recent.length>0&&(
+        <div>
+          <h3 className="font-bold text-gray-700 text-sm mb-2">最近の狩猟記録</h3>
+          <div className="space-y-2">
+            {recent.map(r=>{
+              const gun=state.guns.find(g=>g.id===r.gunId);
+              return(
+                <div key={r.id} className="bg-white rounded-xl p-3 border text-sm">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="font-bold">{r.date}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${r.purpose==='狩猟'?'bg-green-100 text-green-700':'bg-orange-100 text-orange-700'}`}>{r.purpose}</span>
+                  </div>
+                  <div className="text-gray-700">{r.target} {r.captureCount}頭（{r.gender}）</div>
+                  <div className="text-gray-500 text-xs">{r.ammoType} {r.ammoUsed}発 / {r.location} {r.meshNumber}</div>
+                  {gun&&<div className="text-gray-400 text-xs">銃: {gun.number}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {state.personalInfo.name&&(
+        <div className="bg-white rounded-xl p-3 border text-sm">
+          <div className="text-gray-500 text-xs mb-1">登録者</div>
+          <div className="font-bold">{state.personalInfo.name}</div>
+          <div className="text-gray-500 text-xs">{state.personalInfo.licenseNumber}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────
+// PERSONAL INFO TAB
+// ──────────────────────────────────────────
+function PersonalInfoTab({state,setState}){
+  const [editing,setEditing]=useState(false);
+  const [form,setForm]=useState(state.personalInfo);
+  const [gunModal,setGunModal]=useState(null);
+  const [rangeModal,setRangeModal]=useState(null);
+  const [storeModal,setStoreModal]=useState(null);
+
+  const f=k=>e=>setForm({...form,[k]:e.target.value});
+
+  function savePersonal(){
+    setState(s=>({...s,personalInfo:form}));
+    setEditing(false);
+  }
+
+  function saveGun(g){
+    if(g.id) setState(s=>({...s,guns:s.guns.map(x=>x.id===g.id?g:x)}));
+    else setState(s=>({...s,guns:[...s.guns,{...g,id:genId()}]}));
+    setGunModal(null);
+  }
+  function delGun(id){if(confirm('この銃を削除しますか？'))setState(s=>({...s,guns:s.guns.filter(x=>x.id!==id)}));}
+
+  function saveRange(r){
+    if(r.id) setState(s=>({...s,ranges:s.ranges.map(x=>x.id===r.id?r:x)}));
+    else setState(s=>({...s,ranges:[...s.ranges,{...r,id:genId()}]}));
+    setRangeModal(null);
+  }
+  function delRange(id){if(confirm('削除しますか？'))setState(s=>({...s,ranges:s.ranges.filter(x=>x.id!==id)}));}
+
+  function saveStore(r){
+    if(r.id) setState(s=>({...s,stores:s.stores.map(x=>x.id===r.id?r:x)}));
+    else setState(s=>({...s,stores:[...s.stores,{...r,id:genId()}]}));
+    setStoreModal(null);
+  }
+  function delStore(id){if(confirm('削除しますか？'))setState(s=>({...s,stores:s.stores.filter(x=>x.id!==id)}));}
+
+  return(
+    <div className="p-4 space-y-4">
+      {/* Personal Info */}
+      <div className="bg-white rounded-xl p-4 border">
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="font-bold">個人情報</h3>
+          {editing
+            ?<div className="flex gap-2"><Btn variant="outline" onClick={()=>setEditing(false)}>キャンセル</Btn><Btn onClick={savePersonal}>保存</Btn></div>
+            :<Btn variant="secondary" onClick={()=>{setForm(state.personalInfo);setEditing(true);}}>編集</Btn>
+          }
+        </div>
+        {editing?(
+          <div>
+            <Inp label="氏名" value={form.name} onChange={f('name')}/>
+            <Inp label="郵便番号" value={form.postalCode} onChange={f('postalCode')} placeholder="000-0000"/>
+            <Inp label="住所" value={form.address} onChange={f('address')}/>
+            <Inp label="電話番号" type="tel" value={form.phone} onChange={f('phone')}/>
+            <Inp label="許可証番号" value={form.licenseNumber} onChange={f('licenseNumber')} placeholder="第12306240001号"/>
+            <Sel label="免許種別" value={form.licenseType} onChange={f('licenseType')} options={['第一種','第二種']}/>
+            <Inp label="許可証有効期限" type="date" value={form.licenseExpiry} onChange={f('licenseExpiry')}/>
+            <Inp label="猟友会" value={form.huntingAssociation} onChange={f('huntingAssociation')}/>
+          </div>
+        ):(
+          <div className="space-y-2 text-sm">
+            {[
+              ['氏名',state.personalInfo.name],
+              ['住所',state.personalInfo.address],
+              ['電話番号',state.personalInfo.phone],
+              ['許可証番号',state.personalInfo.licenseNumber],
+              ['免許種別',state.personalInfo.licenseType],
+              ['有効期限',state.personalInfo.licenseExpiry],
+              ['猟友会',state.personalInfo.huntingAssociation],
+            ].map(([k,v])=>(
+              <div key={k} className="flex">
+                <span className="text-gray-400 w-24 shrink-0 text-xs">{k}</span>
+                <span className="text-gray-700">{v||'—'}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Guns */}
+      <div className="bg-white rounded-xl p-4 border">
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="font-bold">使用銃</h3>
+          <Btn onClick={()=>setGunModal({number:'',type:'散弾銃',caliber:'',registrationNumber:'',acquiredDate:''})}>＋追加</Btn>
+        </div>
+        {state.guns.length===0?<p className="text-sm text-gray-400">未登録</p>:state.guns.map(g=>(
+          <div key={g.id} className="flex justify-between items-center py-2 border-b last:border-0">
+            <div>
+              <div className="font-medium text-sm">{g.number}</div>
+              <div className="text-xs text-gray-400">{g.type}{g.caliber&&' / '+g.caliber}</div>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={()=>setGunModal(g)} className="text-blue-600 text-sm">編集</button>
+              <button onClick={()=>delGun(g.id)} className="text-red-500 text-sm">削除</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Shooting Ranges */}
+      <div className="bg-white rounded-xl p-4 border">
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="font-bold">射撃場</h3>
+          <Btn onClick={()=>setRangeModal({name:'',address:''})}>＋追加</Btn>
+        </div>
+        {state.ranges.length===0?<p className="text-sm text-gray-400">未登録</p>:state.ranges.map(r=>(
+          <div key={r.id} className="flex justify-between items-center py-2 border-b last:border-0">
+            <div>
+              <div className="font-medium text-sm">{r.name}</div>
+              <div className="text-xs text-gray-400">{r.address}</div>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={()=>setRangeModal(r)} className="text-blue-600 text-sm">編集</button>
+              <button onClick={()=>delRange(r.id)} className="text-red-500 text-sm">削除</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Purchase Locations */}
+      <div className="bg-white rounded-xl p-4 border">
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="font-bold">購入場所</h3>
+          <Btn onClick={()=>setStoreModal({name:'',address:''})}>＋追加</Btn>
+        </div>
+        {state.stores.length===0?<p className="text-sm text-gray-400">未登録</p>:state.stores.map(st=>(
+          <div key={st.id} className="flex justify-between items-center py-2 border-b last:border-0">
+            <div>
+              <div className="font-medium text-sm">{st.name}</div>
+              <div className="text-xs text-gray-400">{st.address}</div>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={()=>setStoreModal(st)} className="text-blue-600 text-sm">編集</button>
+              <button onClick={()=>delStore(st.id)} className="text-red-500 text-sm">削除</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Gun Modal */}
+      {gunModal&&(
+        <Modal title={gunModal.id?'銃を編集':'銃を追加'} onClose={()=>setGunModal(null)}>
+          <GunForm init={gunModal} onSave={saveGun} onCancel={()=>setGunModal(null)}/>
+        </Modal>
+      )}
+      {rangeModal&&(
+        <Modal title={rangeModal.id?'射撃場を編集':'射撃場を追加'} onClose={()=>setRangeModal(null)}>
+          <TwoFieldForm init={rangeModal} f1={{k:'name',l:'射撃場名'}} f2={{k:'address',l:'住所'}} onSave={saveRange} onCancel={()=>setRangeModal(null)}/>
+        </Modal>
+      )}
+      {storeModal&&(
+        <Modal title={storeModal.id?'購入場所を編集':'購入場所を追加'} onClose={()=>setStoreModal(null)}>
+          <TwoFieldForm init={storeModal} f1={{k:'name',l:'名称'}} f2={{k:'address',l:'住所'}} onSave={saveStore} onCancel={()=>setStoreModal(null)}/>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function GunForm({init,onSave,onCancel}){
+  const [f,sf]=useState(init);
+  const u=k=>e=>sf({...f,[k]:e.target.value});
+  return(
+    <div>
+      <Inp label="銃番号" value={f.number} onChange={u('number')} placeholder="N711561"/>
+      <Sel label="銃種" value={f.type} onChange={u('type')} options={['散弾銃','ライフル銃','空気銃','その他']}/>
+      <Inp label="口径" value={f.caliber} onChange={u('caliber')} placeholder="12番 / .308等"/>
+      <Inp label="登録番号" value={f.registrationNumber} onChange={u('registrationNumber')}/>
+      <Inp label="取得年月日" type="date" value={f.acquiredDate} onChange={u('acquiredDate')}/>
+      <div className="flex gap-2 mt-4">
+        <Btn variant="outline" className="flex-1" onClick={onCancel}>キャンセル</Btn>
+        <Btn className="flex-1" onClick={()=>onSave(f)}>保存</Btn>
+      </div>
+    </div>
+  );
+}
+
+function TwoFieldForm({init,f1,f2,onSave,onCancel}){
+  const [f,sf]=useState(init);
+  return(
+    <div>
+      <Inp label={f1.l} value={f[f1.k]||''} onChange={e=>sf({...f,[f1.k]:e.target.value})}/>
+      <Inp label={f2.l} value={f[f2.k]||''} onChange={e=>sf({...f,[f2.k]:e.target.value})}/>
+      <div className="flex gap-2 mt-4">
+        <Btn variant="outline" className="flex-1" onClick={onCancel}>キャンセル</Btn>
+        <Btn className="flex-1" onClick={()=>onSave(f)}>保存</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────
+// HUNTING TAB
+// ──────────────────────────────────────────
+function HuntingTab({state,setState}){
+  const [modal,setModal]=useState(null);
+  const [filterYear,setFY]=useState('');
+  const [filterPurpose,setFP]=useState('');
+
+  const years=[...new Set(state.huntRecords.map(r=>r.date.substr(0,4)))].sort().reverse();
+
+  const records=[...state.huntRecords]
+    .filter(r=>!filterYear||r.date.startsWith(filterYear))
+    .filter(r=>!filterPurpose||r.purpose===filterPurpose)
+    .sort((a,b)=>b.date.localeCompare(a.date));
+
+  const today=new Date().toISOString().split('T')[0];
+  const newRec={date:today,purpose:'狩猟',target:'ニホンジカ',captureCount:1,gender:'雄',location:'',meshNumber:'',gunId:state.guns[0]?.id||'',ammoType:'散弾',ammoUsed:1,note:''};
+
+  function save(rec){
+    if(rec.id) setState(s=>({...s,huntRecords:s.huntRecords.map(r=>r.id===rec.id?rec:r)}));
+    else setState(s=>({...s,huntRecords:[...s.huntRecords,{...rec,id:genId()}]}));
+    setModal(null);
+  }
+  function del(id){if(confirm('この記録を削除しますか？'))setState(s=>({...s,huntRecords:s.huntRecords.filter(r=>r.id!==id)}));}
+
+  return(
+    <div className="p-4">
+      <div className="flex gap-2 mb-3 flex-wrap">
+        <select value={filterYear} onChange={e=>setFY(e.target.value)} className="border rounded-lg px-2 py-1.5 text-sm bg-white flex-1 min-w-0">
+          <option value="">全年度</option>
+          {years.map(y=><option key={y} value={y}>{y}年</option>)}
+        </select>
+        <select value={filterPurpose} onChange={e=>setFP(e.target.value)} className="border rounded-lg px-2 py-1.5 text-sm bg-white flex-1 min-w-0">
+          <option value="">全目的</option>
+          {PURPOSES.map(p=><option key={p} value={p}>{p}</option>)}
+        </select>
+        <Btn onClick={()=>setModal(newRec)}>＋追加</Btn>
+      </div>
+
+      <div className="text-xs text-gray-400 mb-2">{records.length}件 / 合計{records.reduce((s,r)=>s+(Number(r.captureCount)||0),0)}頭 / {records.reduce((s,r)=>s+(Number(r.ammoUsed)||0),0)}発</div>
+
+      <div className="space-y-2">
+        {records.map(r=>{
+          const gun=state.guns.find(g=>g.id===r.gunId);
+          return(
+            <div key={r.id} className="bg-white rounded-xl p-3 border">
+              <div className="flex justify-between items-start gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <span className="font-bold text-sm">{r.date}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${r.purpose==='狩猟'?'bg-green-100 text-green-700':'bg-orange-100 text-orange-700'}`}>{r.purpose}</span>
+                  </div>
+                  <div className="text-sm text-gray-700">{r.target}　{r.captureCount}頭（{r.gender}）</div>
+                  <div className="text-sm text-gray-600">{r.ammoType}　{r.ammoUsed}発</div>
+                  <div className="text-xs text-gray-400 mt-0.5">{r.location}{r.meshNumber&&'　'+r.meshNumber}{gun&&'　銃:'+gun.number}</div>
+                  {r.note&&<div className="text-xs text-gray-400 mt-0.5">備考: {r.note}</div>}
+                </div>
+                <div className="flex gap-3 shrink-0">
+                  <button onClick={()=>setModal(r)} className="text-blue-600 text-xs">編集</button>
+                  <button onClick={()=>del(r.id)} className="text-red-500 text-xs">削除</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {records.length===0&&<p className="text-center text-gray-400 py-10 text-sm">記録がありません</p>}
+      </div>
+
+      {modal&&(
+        <Modal title={modal.id?'狩猟記録を編集':'狩猟記録を追加'} onClose={()=>setModal(null)}>
+          <HuntForm init={modal} guns={state.guns} onSave={save} onCancel={()=>setModal(null)}/>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function HuntForm({init,guns,onSave,onCancel}){
+  const [f,sf]=useState(init);
+  const u=k=>e=>sf({...f,[k]:e.target.value});
+  return(
+    <div>
+      <Inp label="日付" type="date" value={f.date} onChange={u('date')}/>
+      <Sel label="目的" value={f.purpose} options={PURPOSES} onChange={u('purpose')}/>
+      <Sel label="獲物" value={f.target} options={TARGETS} onChange={u('target')}/>
+      <div className="grid grid-cols-2 gap-3">
+        <Inp label="捕獲数（頭）" type="number" min="0" value={f.captureCount} onChange={u('captureCount')}/>
+        <Sel label="雌雄" value={f.gender} options={GENDERS} onChange={u('gender')}/>
+      </div>
+      <Inp label="猟場名" value={f.location} onChange={u('location')} placeholder="○○猟区"/>
+      <Inp label="メッシュ番号" value={f.meshNumber} onChange={u('meshNumber')} placeholder="ホ703" hint="カタカナ1文字＋数字3桁"/>
+      <Sel label="使用銃" value={f.gunId} onChange={u('gunId')}
+        options={[{value:'',label:'—未選択—'},...guns.map(g=>({value:g.id,label:g.number}))]}/>
+      <Sel label="弾種" value={f.ammoType} options={AMMO_TYPES} onChange={u('ammoType')}/>
+      <Inp label="使用弾数（発）" type="number" min="0" value={f.ammoUsed} onChange={u('ammoUsed')}/>
+      <Inp label="備考" value={f.note||''} onChange={u('note')}/>
+      <div className="flex gap-2 mt-4">
+        <Btn variant="outline" className="flex-1" onClick={onCancel}>キャンセル</Btn>
+        <Btn className="flex-1" onClick={()=>onSave(f)}>保存</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────
+// TEST SHOOTING TAB
+// ──────────────────────────────────────────
+function TestShootingTab({state,setState}){
+  const [modal,setModal]=useState(null);
+  const records=[...state.shootRecords].sort((a,b)=>b.date.localeCompare(a.date));
+  const today=new Date().toISOString().split('T')[0];
+  const newRec={date:today,rangeId:state.ranges[0]?.id||'',gunId:state.guns[0]?.id||'',ammoType:'散弾',ammoUsed:0,note:''};
+
+  function save(rec){
+    if(rec.id) setState(s=>({...s,shootRecords:s.shootRecords.map(r=>r.id===rec.id?rec:r)}));
+    else setState(s=>({...s,shootRecords:[...s.shootRecords,{...rec,id:genId()}]}));
+    setModal(null);
+  }
+  function del(id){if(confirm('この記録を削除しますか？'))setState(s=>({...s,shootRecords:s.shootRecords.filter(r=>r.id!==id)}));}
+
+  return(
+    <div className="p-4">
+      <div className="flex justify-end mb-3">
+        <Btn onClick={()=>setModal(newRec)}>＋追加</Btn>
+      </div>
+      <div className="space-y-2">
+        {records.map(r=>{
+          const gun=state.guns.find(g=>g.id===r.gunId);
+          const range=state.ranges.find(rg=>rg.id===r.rangeId);
+          return(
+            <div key={r.id} className="bg-white rounded-xl p-3 border">
+              <div className="flex justify-between items-start gap-2">
+                <div className="flex-1">
+                  <div className="font-bold text-sm mb-1">{r.date}</div>
+                  <div className="text-sm text-gray-700">{range?.name||'—'}</div>
+                  <div className="text-sm text-gray-600">{gun?.number||'—'}　/ {r.ammoType}　{r.ammoUsed}発</div>
+                  {r.note&&<div className="text-xs text-gray-400 mt-0.5">備考: {r.note}</div>}
+                </div>
+                <div className="flex gap-3 shrink-0">
+                  <button onClick={()=>setModal(r)} className="text-blue-600 text-xs">編集</button>
+                  <button onClick={()=>del(r.id)} className="text-red-500 text-xs">削除</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {records.length===0&&<p className="text-center text-gray-400 py-10 text-sm">記録がありません</p>}
+      </div>
+      {modal&&(
+        <Modal title={modal.id?'試射記録を編集':'試射記録を追加'} onClose={()=>setModal(null)}>
+          <ShootForm init={modal} guns={state.guns} ranges={state.ranges} onSave={save} onCancel={()=>setModal(null)}/>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function ShootForm({init,guns,ranges,onSave,onCancel}){
+  const [f,sf]=useState(init);
+  const u=k=>e=>sf({...f,[k]:e.target.value});
+  return(
+    <div>
+      <Inp label="日付" type="date" value={f.date} onChange={u('date')}/>
+      <Sel label="射撃場" value={f.rangeId} onChange={u('rangeId')}
+        options={[{value:'',label:'—未選択—'},...ranges.map(r=>({value:r.id,label:r.name}))]}/>
+      <Sel label="使用銃" value={f.gunId} onChange={u('gunId')}
+        options={[{value:'',label:'—未選択—'},...guns.map(g=>({value:g.id,label:g.number}))]}/>
+      <Sel label="弾種" value={f.ammoType} options={AMMO_TYPES} onChange={u('ammoType')}/>
+      <Inp label="使用弾数（発）" type="number" min="0" value={f.ammoUsed} onChange={u('ammoUsed')}/>
+      <Inp label="備考" value={f.note||''} onChange={u('note')}/>
+      <div className="flex gap-2 mt-4">
+        <Btn variant="outline" className="flex-1" onClick={onCancel}>キャンセル</Btn>
+        <Btn className="flex-1" onClick={()=>onSave(f)}>保存</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────
+// PURCHASE TAB
+// ──────────────────────────────────────────
+function PurchaseTab({state,setState}){
+  const [modal,setModal]=useState(null);
+  const records=[...state.buyRecords].sort((a,b)=>b.date.localeCompare(a.date));
+  const today=new Date().toISOString().split('T')[0];
+  const newRec={date:today,storeId:state.stores[0]?.id||'',ammoType:'散弾',qty:0,note:''};
+
+  function save(rec){
+    if(rec.id) setState(s=>({...s,buyRecords:s.buyRecords.map(r=>r.id===rec.id?rec:r)}));
+    else setState(s=>({...s,buyRecords:[...s.buyRecords,{...rec,id:genId()}]}));
+    setModal(null);
+  }
+  function del(id){if(confirm('この記録を削除しますか？'))setState(s=>({...s,buyRecords:s.buyRecords.filter(r=>r.id!==id)}));}
+
+  const totalByType=AMMO_TYPES.reduce((acc,t)=>{
+    acc[t]=state.buyRecords.filter(r=>r.ammoType===t).reduce((s,r)=>s+(Number(r.qty)||0),0);
+    return acc;
+  },{});
+
+  return(
+    <div className="p-4">
+      <div className="grid grid-cols-3 gap-2 mb-4">
+        {AMMO_TYPES.map(t=>(
+          <div key={t} className="bg-blue-50 rounded-xl p-2 text-center border border-blue-100">
+            <div className="text-lg font-bold text-blue-700">{totalByType[t]}</div>
+            <div className="text-xs text-gray-500">{t}</div>
+          </div>
+        ))}
+      </div>
+      <div className="flex justify-end mb-3">
+        <Btn onClick={()=>setModal(newRec)}>＋追加</Btn>
+      </div>
+      <div className="space-y-2">
+        {records.map(r=>{
+          const store=state.stores.find(s=>s.id===r.storeId);
+          return(
+            <div key={r.id} className="bg-white rounded-xl p-3 border">
+              <div className="flex justify-between items-start gap-2">
+                <div className="flex-1">
+                  <div className="font-bold text-sm mb-1">{r.date}</div>
+                  <div className="text-sm text-gray-700">{store?.name||'—'}</div>
+                  <div className="text-sm text-gray-600">{r.ammoType}　{r.qty}発</div>
+                  {r.note&&<div className="text-xs text-gray-400 mt-0.5">備考: {r.note}</div>}
+                </div>
+                <div className="flex gap-3 shrink-0">
+                  <button onClick={()=>setModal(r)} className="text-blue-600 text-xs">編集</button>
+                  <button onClick={()=>del(r.id)} className="text-red-500 text-xs">削除</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {records.length===0&&<p className="text-center text-gray-400 py-10 text-sm">記録がありません</p>}
+      </div>
+      {modal&&(
+        <Modal title={modal.id?'購入記録を編集':'購入記録を追加'} onClose={()=>setModal(null)}>
+          <BuyForm init={modal} stores={state.stores} onSave={save} onCancel={()=>setModal(null)}/>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function BuyForm({init,stores,onSave,onCancel}){
+  const [f,sf]=useState(init);
+  const u=k=>e=>sf({...f,[k]:e.target.value});
+  return(
+    <div>
+      <Inp label="日付" type="date" value={f.date} onChange={u('date')}/>
+      <Sel label="購入場所" value={f.storeId} onChange={u('storeId')}
+        options={[{value:'',label:'—未選択—'},...stores.map(s=>({value:s.id,label:s.name}))]}/>
+      <Sel label="弾種" value={f.ammoType} options={AMMO_TYPES} onChange={u('ammoType')}/>
+      <Inp label="発数" type="number" min="0" value={f.qty} onChange={u('qty')}/>
+      <Inp label="備考" value={f.note||''} onChange={u('note')}/>
+      <div className="flex gap-2 mt-4">
+        <Btn variant="outline" className="flex-1" onClick={onCancel}>キャンセル</Btn>
+        <Btn className="flex-1" onClick={()=>onSave(f)}>保存</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────
+// INVENTORY TAB
+// ──────────────────────────────────────────
+function InventoryTab({state,setState}){
+  const [editCO,setEditCO]=useState(false);
+  const [coForm,setCOForm]=useState({...state.carryOver});
+  const inv=calcInv(state);
+
+  const byType=(arr,key)=>AMMO_TYPES.reduce((acc,t)=>{
+    acc[t]=arr.filter(r=>r.ammoType===t).reduce((s,r)=>s+(Number(r[key])||0),0);
+    return acc;
+  },{});
+
+  const bought=byType(state.buyRecords,'qty');
+  const huntUsed=byType(state.huntRecords,'ammoUsed');
+  const shootUsed=byType(state.shootRecords,'ammoUsed');
+
+  function saveCO(){
+    const co={'散弾':Number(coForm['散弾'])||0,'単弾12番':Number(coForm['単弾12番'])||0,'単弾20番':Number(coForm['単弾20番'])||0};
+    setState(s=>({...s,carryOver:co}));
+    setEditCO(false);
+  }
+
+  return(
+    <div className="p-4 space-y-3">
+      {AMMO_TYPES.map(t=>{
+        const n=inv[t];
+        const red=n<=0,yellow=n>0&&n<=20;
+        return(
+          <div key={t} className={`rounded-xl p-4 border-2 ${red?'border-red-400 bg-red-50':yellow?'border-yellow-400 bg-yellow-50':'border-green-400 bg-green-50'}`}>
+            <div className="flex justify-between items-center">
+              <span className="font-bold text-gray-800">{t}</span>
+              <span className={`text-3xl font-bold ${red?'text-red-600':yellow?'text-yellow-600':'text-green-700'}`}>{n}<span className="text-base ml-1">発</span></span>
+            </div>
+            {red&&<div className="text-red-600 text-sm font-medium mt-1">🔴 在庫切れ</div>}
+            {yellow&&<div className="text-yellow-600 text-sm font-medium mt-1">🟡 残りわずか（20発以下）</div>}
+            <div className="mt-3 pt-2 border-t border-current/20 space-y-1">
+              {[
+                ['繰越在庫',state.carryOver[t]||0,'text-gray-600',''],
+                ['購入合計',bought[t],'text-blue-600','+'],
+                ['狩猟消費',huntUsed[t],'text-red-500','-'],
+                ['試射消費',shootUsed[t],'text-orange-500','-'],
+              ].map(([label,val,cls,sign])=>(
+                <div key={label} className="flex justify-between text-sm">
+                  <span className="text-gray-500">{label}</span>
+                  <span className={cls}>{sign}{val} 発</span>
+                </div>
+              ))}
+              <div className="flex justify-between text-sm font-bold border-t pt-1 border-gray-300 mt-1">
+                <span>現在庫</span>
+                <span className={red?'text-red-600':yellow?'text-yellow-600':'text-green-700'}>{n} 発</span>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      <div className="bg-white rounded-xl p-4 border">
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="font-bold text-sm">繰越在庫（期首）</h3>
+          {editCO
+            ?<div className="flex gap-2"><Btn variant="outline" onClick={()=>setEditCO(false)}>キャンセル</Btn><Btn onClick={saveCO}>保存</Btn></div>
+            :<Btn variant="secondary" onClick={()=>{setCOForm({...state.carryOver});setEditCO(true);}}>編集</Btn>
+          }
+        </div>
+        {editCO
+          ?AMMO_TYPES.map(t=>(
+            <Inp key={t} label={t} type="number" min="0" value={coForm[t]||0}
+              onChange={e=>setCOForm({...coForm,[t]:e.target.value})}/>
+          ))
+          :<div className="space-y-1 text-sm">
+            {AMMO_TYPES.map(t=>(
+              <div key={t} className="flex justify-between">
+                <span className="text-gray-500">{t}</span>
+                <span>{state.carryOver[t]||0} 発</span>
+              </div>
+            ))}
+          </div>
+        }
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────
+// PRINT TAB
+// ──────────────────────────────────────────
+function PrintTab({state}){
+  const [printType,setPT]=useState('hunting');
+  const [yearFilter,setYF]=useState('');
+
+  const years=[...new Set([
+    ...state.huntRecords.map(r=>r.date.substr(0,4)),
+    ...state.shootRecords.map(r=>r.date.substr(0,4)),
+    ...state.buyRecords.map(r=>r.date.substr(0,4)),
+  ])].filter(Boolean).sort().reverse();
+
+  const filter=arr=>arr.filter(r=>!yearFilter||r.date.startsWith(yearFilter)).sort((a,b)=>a.date.localeCompare(b.date));
+  const hRecs=filter(state.huntRecords);
+  const sRecs=filter(state.shootRecords);
+  const bRecs=filter(state.buyRecords);
+
+  const gunName=id=>state.guns.find(g=>g.id===id)?.number||'—';
+  const rangeName=id=>state.ranges.find(r=>r.id===id)?.name||'—';
+  const storeName=id=>state.stores.find(s=>s.id===id)?.name||'—';
+
+  const chunk=(arr,n)=>{const r=[];for(let i=0;i<arr.length;i+=n)r.push(arr.slice(i,i+n));return r;};
+  const inv=calcInv(state);
+
+  const thCls="border border-gray-400 px-1 py-1 bg-gray-100 text-xs font-bold whitespace-nowrap";
+  const tdCls="border border-gray-300 px-1 py-0.5 text-xs";
+
+  return(
+    <div>
+      {/* Controls */}
+      <div className="no-print p-4 space-y-3 bg-white border-b">
+        <div className="grid grid-cols-2 gap-2">
+          <select value={printType} onChange={e=>setPT(e.target.value)} className="border rounded-lg px-3 py-2 text-sm bg-white">
+            <option value="hunting">狩猟記録</option>
+            <option value="shooting">試射記録</option>
+            <option value="purchase">購入記録</option>
+            <option value="inventory">在庫管理</option>
+          </select>
+          <select value={yearFilter} onChange={e=>setYF(e.target.value)} className="border rounded-lg px-3 py-2 text-sm bg-white">
+            <option value="">全年度</option>
+            {years.map(y=><option key={y} value={y}>{y}年</option>)}
+          </select>
+        </div>
+        <button onClick={()=>window.print()} className="w-full py-3 bg-green-700 text-white rounded-xl font-bold text-base active:bg-green-800">
+          🖨️ 印刷 / スクリーンショット保存
+        </button>
+        <p className="text-xs text-gray-400 text-center">ブラウザの印刷ダイアログ → A4横向き で印刷<br/>または画面をスクリーンショットで保存してください</p>
+      </div>
+
+      {/* Preview & Print content */}
+      <div className="p-4 bg-white">
+        <div className="text-center mb-3">
+          <div className="text-xl font-bold">実包使用記録簿</div>
+          {state.personalInfo.name&&<div className="text-sm mt-1">{state.personalInfo.name}　{state.personalInfo.licenseNumber}</div>}
+          {yearFilter&&<div className="text-sm">{yearFilter}年度</div>}
+        </div>
+
+        {/* Hunting */}
+        {printType==='hunting'&&(
+          chunk(hRecs,20).length===0
+            ?<p className="text-sm text-gray-400 text-center py-4">記録がありません</p>
+            :chunk(hRecs,20).map((pg,pi)=>(
+              <div key={pi} className={pi>0?'print-page mt-4':''}>
+                {pi>0&&<div className="text-lg font-bold text-center mb-2">狩猟記録（続き {pi+1}ページ）</div>}
+                {pi===0&&<div className="font-bold mb-2 border-b pb-1">■ 狩猟・有害鳥獣駆除記録</div>}
+                <table className="w-full border-collapse text-xs">
+                  <thead>
+                    <tr>
+                      {['日付','目的','獲物','捕獲数','雌雄','猟場名','メッシュ','使用銃','弾種','使用数','備考'].map(h=>(
+                        <th key={h} className={thCls}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pg.map(r=>(
+                      <tr key={r.id}>
+                        <td className={tdCls}>{r.date}</td>
+                        <td className={tdCls}>{r.purpose}</td>
+                        <td className={tdCls}>{r.target}</td>
+                        <td className={tdCls+' text-center'}>{r.captureCount}</td>
+                        <td className={tdCls+' text-center'}>{r.gender}</td>
+                        <td className={tdCls}>{r.location}</td>
+                        <td className={tdCls}>{r.meshNumber}</td>
+                        <td className={tdCls}>{gunName(r.gunId)}</td>
+                        <td className={tdCls}>{r.ammoType}</td>
+                        <td className={tdCls+' text-center'}>{r.ammoUsed}</td>
+                        <td className={tdCls}>{r.note}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="text-right text-xs text-gray-400 mt-1">{pi+1}/{chunk(hRecs,20).length}ページ　合計{hRecs.length}件</div>
+              </div>
+            ))
+        )}
+
+        {/* Test Shooting */}
+        {printType==='shooting'&&(
+          <div>
+            <div className="font-bold mb-2 border-b pb-1">■ 試射記録</div>
+            {sRecs.length===0
+              ?<p className="text-sm text-gray-400">記録がありません</p>
+              :<table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr>{['日付','射撃場','使用銃','弾種','使用数','備考'].map(h=><th key={h} className={thCls}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {sRecs.map(r=>(
+                    <tr key={r.id}>
+                      <td className={tdCls}>{r.date}</td>
+                      <td className={tdCls}>{rangeName(r.rangeId)}</td>
+                      <td className={tdCls}>{gunName(r.gunId)}</td>
+                      <td className={tdCls}>{r.ammoType}</td>
+                      <td className={tdCls+' text-center'}>{r.ammoUsed}</td>
+                      <td className={tdCls}>{r.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            }
+          </div>
+        )}
+
+        {/* Purchase */}
+        {printType==='purchase'&&(
+          <div>
+            <div className="font-bold mb-2 border-b pb-1">■ 購入（交付・補充）記録</div>
+            {bRecs.length===0
+              ?<p className="text-sm text-gray-400">記録がありません</p>
+              :<table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr>{['日付','購入場所','弾種','発数','備考'].map(h=><th key={h} className={thCls}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {bRecs.map(r=>(
+                    <tr key={r.id}>
+                      <td className={tdCls}>{r.date}</td>
+                      <td className={tdCls}>{storeName(r.storeId)}</td>
+                      <td className={tdCls}>{r.ammoType}</td>
+                      <td className={tdCls+' text-center'}>{r.qty}</td>
+                      <td className={tdCls}>{r.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            }
+          </div>
+        )}
+
+        {/* Inventory */}
+        {printType==='inventory'&&(
+          <div>
+            <div className="font-bold mb-2 border-b pb-1">■ 在庫管理表</div>
+            <table className="w-full border-collapse text-xs">
+              <thead>
+                <tr>{['弾種','繰越在庫','購入合計','狩猟消費','試射消費','現在庫','状態'].map(h=><th key={h} className={thCls}>{h}</th>)}</tr>
+              </thead>
+              <tbody>
+                {AMMO_TYPES.map(t=>{
+                  const carry=state.carryOver[t]||0;
+                  const b=state.buyRecords.filter(r=>r.ammoType===t).reduce((s,r)=>s+(Number(r.qty)||0),0);
+                  const h=state.huntRecords.filter(r=>r.ammoType===t).reduce((s,r)=>s+(Number(r.ammoUsed)||0),0);
+                  const sh=state.shootRecords.filter(r=>r.ammoType===t).reduce((s,r)=>s+(Number(r.ammoUsed)||0),0);
+                  const cur=carry+b-h-sh;
+                  return(
+                    <tr key={t}>
+                      <td className={tdCls+' font-bold'}>{t}</td>
+                      <td className={tdCls+' text-center'}>{carry}</td>
+                      <td className={tdCls+' text-center'}>{b}</td>
+                      <td className={tdCls+' text-center'}>{h}</td>
+                      <td className={tdCls+' text-center'}>{sh}</td>
+                      <td className={tdCls+' text-center font-bold'}>{cur}</td>
+                      <td className={tdCls+' text-center'}>{cur<=0?'🔴在庫切れ':cur<=20?'🟡残りわずか':'🟢正常'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────
+// MAIN APP
+// ──────────────────────────────────────────
+function App(){
+  const [state,setState]=useState(loadFromLS);
+  const [tab,setTab]=useState('home');
+  const [fileHandle,setFileHandle]=useState(null);
+  // 'init'=起動中 'none'=未設定 'ready'=接続済み 'perm'=許可待ち 'nosup'=非対応
+  const [fileStatus,setFileStatus]=useState('init');
+  const [fileName,setFileName]=useState('');
+  const [msg,setMsg]=useState('');
+  const pendingHandle=useRef(null);
+
+  // 起動時：IndexedDBからハンドルを取得して自動読み込み
+  useEffect(()=>{
+    (async()=>{
+      if(!FSA_SUPPORTED){setFileStatus('nosup');return;}
+      const result=await tryAutoLoad();
+      if(!result){setFileStatus('none');return;}
+      if(result.needsPermission){
+        pendingHandle.current=result.handle;
+        setFileStatus('perm');
+        return;
+      }
+      setFileHandle(result.handle);
+      setFileName(result.handle.name);
+      setState(result.state);
+      setFileStatus('ready');
+    })();
+  },[]);
+
+  // データ変更時にlocalStorageへキャッシュ（フォールバック用）
+  useEffect(()=>{
+    if(fileStatus==='init')return;
+    try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));}catch{}
+  },[state,fileStatus]);
+
+  function showMsg(text){setMsg(text);setTimeout(()=>setMsg(''),4000);}
+
+  // 保存
+  async function handleSave(){
+    if(FSA_SUPPORTED){
+      try{
+        let handle=fileHandle;
+        if(!handle){
+          handle=await pickSaveFile();
+          await idbSet('csvHandle',handle);
+          setFileHandle(handle);
+          setFileName(handle.name);
+          setFileStatus('ready');
+        }
+        await writeToHandle(handle,state);
+        showMsg('✅ '+handle.name+' に保存しました');
+      }catch(e){
+        if(e.name!=='AbortError')showMsg('⚠️ 保存失敗: '+e.message);
+      }
+    }else{
+      // iOS Safari などFSA非対応：CSVをダウンロード
+      downloadCsv(state);
+      showMsg('📥 CSVをダウンロードしました。ファイルを保管してください');
+    }
+  }
+
+  // 既存CSVを開く
+  async function handleOpenFile(){
+    if(!FSA_SUPPORTED)return handleImportCsv();
+    try{
+      const handle=await pickOpenFile();
+      const file=await handle.getFile();
+      const text=await file.text();
+      const loaded=fromCsv(text);
+      if(confirm('「'+handle.name+'」を読み込みます。現在のデータは上書きされます。よろしいですか？')){
+        await idbSet('csvHandle',handle);
+        setFileHandle(handle);
+        setFileName(handle.name);
+        setState(loaded);
+        setFileStatus('ready');
+        showMsg('✅ '+handle.name+' を読み込みました');
+      }
+    }catch(e){
+      if(e.name!=='AbortError')showMsg('⚠️ 読み込み失敗: '+e.message);
+    }
+  }
+
+  // 新規CSVファイルを作成
+  async function handleNewFile(){
+    if(!FSA_SUPPORTED){showMsg('このブラウザは非対応です');return;}
+    try{
+      const handle=await pickSaveFile();
+      await writeToHandle(handle,state);
+      await idbSet('csvHandle',handle);
+      setFileHandle(handle);
+      setFileName(handle.name);
+      setFileStatus('ready');
+      showMsg('✅ '+handle.name+' を作成しました');
+    }catch(e){
+      if(e.name!=='AbortError')showMsg('⚠️ 失敗: '+e.message);
+    }
+  }
+
+  // 許可を再要求して読み込み
+  async function handleRequestPerm(){
+    const handle=pendingHandle.current;
+    if(!handle)return;
+    const result=await requestPermission(handle);
+    if(result){
+      await idbSet('csvHandle',handle);
+      setFileHandle(handle);
+      setFileName(handle.name);
+      setState(result);
+      setFileStatus('ready');
+      showMsg('✅ '+handle.name+' を読み込みました');
+    }else{
+      showMsg('⚠️ アクセスが拒否されました');
+      setFileStatus('none');
+    }
+  }
+
+  // CSVインポート（FSA非対応ブラウザ用）
+  function handleImportCsv(){
+    const inp=document.createElement('input');
+    inp.type='file';inp.accept='.csv';
+    inp.onchange=e=>{
+      const file=e.target.files[0];if(!file)return;
+      const reader=new FileReader();
+      reader.onload=ev=>{
+        try{
+          const loaded=fromCsv(ev.target.result);
+          if(confirm('CSVを読み込みます。現在のデータは上書きされます。よろしいですか？')){
+            setState(loaded);
+            showMsg('✅ CSVを読み込みました');
+          }
+        }catch{showMsg('⚠️ CSVの読み込みに失敗しました');}
+      };
+      reader.readAsText(file,'UTF-8');
+    };
+    inp.click();
+  }
+
+  const TABS=[
+    {id:'home',  label:'ホーム',  icon:'🏠'},
+    {id:'personal',label:'個人情報',icon:'👤'},
+    {id:'hunting',label:'狩猟記録',icon:'🦌'},
+    {id:'shooting',label:'試射記録',icon:'🎯'},
+    {id:'purchase',label:'購入記録',icon:'📦'},
+    {id:'inventory',label:'在庫管理',icon:'📊'},
+    {id:'print',  label:'印刷',   icon:'🖨️'},
+  ];
+
+  // ステータスバー
+  function StatusBar(){
+    if(fileStatus==='init')return null;
+    if(fileStatus==='ready')return(
+      <div className="no-print bg-green-900 text-green-200 text-xs px-3 py-1 flex items-center gap-2">
+        <span>📄 {fileName}</span>
+        <span className="ml-auto opacity-60">自動保存: 保存ボタンで上書き</span>
+      </div>
+    );
+    if(fileStatus==='perm')return(
+      <div className="no-print bg-yellow-600 text-white text-xs px-3 py-1.5 flex items-center gap-2">
+        <span className="flex-1">前回のファイルが見つかりました。アクセスを許可してください。</span>
+        <button onClick={handleRequestPerm} className="bg-white text-yellow-700 font-bold px-2 py-0.5 rounded">読み込む</button>
+      </div>
+    );
+    if(fileStatus==='none')return(
+      <div className="no-print bg-blue-700 text-white text-xs px-3 py-1.5 flex items-center gap-2">
+        <span className="flex-1">💾 保存ファイルを設定してください</span>
+        <button onClick={handleNewFile} className="bg-white text-blue-700 font-bold px-2 py-0.5 rounded mr-1">新規作成</button>
+        <button onClick={handleOpenFile} className="bg-white text-blue-700 font-bold px-2 py-0.5 rounded">既存を開く</button>
+      </div>
+    );
+    if(fileStatus==='nosup')return(
+      <div className="no-print bg-orange-600 text-white text-xs px-3 py-1 flex items-center gap-2">
+        <span className="flex-1">⚠️ このブラウザは自動保存非対応。「保存」でCSVをダウンロード後、保管してください。</span>
+        <button onClick={handleImportCsv} className="bg-white text-orange-700 font-bold px-2 py-0.5 rounded">CSV読込</button>
+      </div>
+    );
+    return null;
+  }
+
+  return(
+    <div className="flex flex-col min-h-screen max-w-2xl mx-auto bg-gray-100">
+      <header className="no-print bg-green-800 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-40 shadow">
+        <h1 className="font-bold text-lg tracking-wide">🔫 実包使用記録</h1>
+        <div className="flex gap-2">
+          {fileStatus==='ready'&&(
+            <button onClick={handleOpenFile} className="text-xs bg-green-700 px-2 py-1.5 rounded-lg">ファイル変更</button>
+          )}
+          <button onClick={handleSave} className="text-xs bg-yellow-400 text-yellow-900 font-bold px-3 py-1.5 rounded-lg active:bg-yellow-300">💾 保存</button>
+        </div>
+      </header>
+      <StatusBar/>
+      {msg&&<div className="no-print bg-white border-b text-sm px-4 py-2 text-center text-gray-700">{msg}</div>}
+
+      <main className="flex-1 overflow-y-auto pb-20 no-print">
+        {tab==='home'     &&<HomeTab state={state}/>}
+        {tab==='personal' &&<PersonalInfoTab state={state} setState={setState}/>}
+        {tab==='hunting'  &&<HuntingTab state={state} setState={setState}/>}
+        {tab==='shooting' &&<TestShootingTab state={state} setState={setState}/>}
+        {tab==='purchase' &&<PurchaseTab state={state} setState={setState}/>}
+        {tab==='inventory'&&<InventoryTab state={state} setState={setState}/>}
+        {tab==='print'    &&<PrintTab state={state}/>}
+      </main>
+
+      <nav className="no-print fixed bottom-0 inset-x-0 max-w-2xl mx-auto bg-white border-t shadow-lg z-40">
+        <div className="flex">
+          {TABS.map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)}
+              className={`flex-1 flex flex-col items-center justify-center py-2 text-[10px] transition-colors ${tab===t.id?'text-green-800 font-bold':'text-gray-400'}`}>
+              <span className="text-xl leading-tight">{t.icon}</span>
+              <span className="leading-tight mt-0.5">{t.label}</span>
+            </button>
+          ))}
+        </div>
+      </nav>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
