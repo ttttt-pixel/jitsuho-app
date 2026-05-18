@@ -8,6 +8,7 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <style>
 *{box-sizing:border-box;}
 body{margin:0;font-family:'Hiragino Sans','Yu Gothic','Meiryo',sans-serif;background:#f3f4f6;}
@@ -914,6 +915,30 @@ function InventoryTab({state,setState}){
 function PrintTab({state}){
   const [printType,setPT]=useState('hunting');
   const [yearFilter,setYF]=useState('');
+  const [pdfMsg,setPdfMsg]=useState('');
+
+  function savePdf(){
+    const el=document.getElementById('pdf-preview');
+    if(!el){return;}
+    setPdfMsg('PDF生成中...');
+    const name=state.personalInfo.name||'実包記録';
+    const year=yearFilter?yearFilter+'年_':'';
+    const typeMap={hunting:'狩猟記録',shooting:'試射記録',purchase:'購入記録',inventory:'在庫管理'};
+    const filename=`${name}_${year}${typeMap[printType]}.pdf`;
+    const opt={
+      margin:[8,8,8,8],
+      filename,
+      image:{type:'jpeg',quality:0.95},
+      html2canvas:{scale:2,useCORS:true,logging:false},
+      jsPDF:{unit:'mm',format:'a4',orientation:'landscape'}
+    };
+    html2pdf().set(opt).from(el).save().then(()=>{
+      setPdfMsg('');
+    }).catch(e=>{
+      setPdfMsg('⚠️ PDF生成失敗: '+e.message);
+      setTimeout(()=>setPdfMsg(''),4000);
+    });
+  }
 
   const years=[...new Set([
     ...state.huntRecords.map(r=>r.date.substr(0,4)),
@@ -952,14 +977,20 @@ function PrintTab({state}){
             {years.map(y=><option key={y} value={y}>{y}年</option>)}
           </select>
         </div>
-        <button onClick={()=>window.print()} className="w-full py-3 bg-green-700 text-white rounded-xl font-bold text-base active:bg-green-800">
-          🖨️ 印刷 / スクリーンショット保存
+        <button onClick={savePdf} className="w-full py-3 bg-red-600 text-white rounded-xl font-bold text-base active:bg-red-700">
+          📄 PDFとして保存
         </button>
-        <p className="text-xs text-gray-400 text-center">ブラウザの印刷ダイアログ → A4横向き で印刷<br/>または画面をスクリーンショットで保存してください</p>
+        <button onClick={()=>window.print()} className="w-full py-2 bg-green-700 text-white rounded-xl font-bold text-sm active:bg-green-800">
+          🖨️ 印刷
+        </button>
+        {pdfMsg
+          ?<p className="text-sm text-center text-blue-600 font-medium">{pdfMsg}</p>
+          :<p className="text-xs text-gray-400 text-center">PDFはA4横向きで端末に保存されます</p>
+        }
       </div>
 
       {/* Preview & Print content */}
-      <div className="p-4 bg-white">
+      <div id="pdf-preview" className="p-4 bg-white">
         <div className="text-center mb-3">
           <div className="text-xl font-bold">実包使用記録簿</div>
           {state.personalInfo.name&&<div className="text-sm mt-1">{state.personalInfo.name}　{state.personalInfo.licenseNumber}</div>}
