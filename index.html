@@ -923,6 +923,160 @@ function InventoryTab({state,setState}){
 }
 
 // ──────────────────────────────────────────
+// RECORD TAB（狩猟・試射・購入 統合）
+// ──────────────────────────────────────────
+function RecordTab({state,setState}){
+  const [modal,setModal]=useState(null);
+  const [filterType,setFT]=useState('');
+  const [filterYear,setFY]=useState('');
+
+  const today=new Date().toISOString().split('T')[0];
+
+  const allRecs=[
+    ...state.huntRecords.map(r=>({...r,_type:'hunt'})),
+    ...state.shootRecords.map(r=>({...r,_type:'shoot'})),
+    ...state.buyRecords.map(r=>({...r,_type:'buy'})),
+  ].filter(r=>!filterYear||r.date.startsWith(filterYear))
+   .filter(r=>!filterType||r._type===filterType)
+   .sort((a,b)=>b.date.localeCompare(a.date));
+
+  const years=[...new Set([
+    ...state.huntRecords.map(r=>r.date.substr(0,4)),
+    ...state.shootRecords.map(r=>r.date.substr(0,4)),
+    ...state.buyRecords.map(r=>r.date.substr(0,4)),
+  ])].filter(Boolean).sort().reverse();
+
+  function save(rec){
+    const{_type,...data}=rec;
+    if(_type==='hunt'){
+      if(data.id)setState(s=>({...s,huntRecords:s.huntRecords.map(r=>r.id===data.id?data:r)}));
+      else setState(s=>({...s,huntRecords:[...s.huntRecords,{...data,id:genId()}]}));
+    }else if(_type==='shoot'){
+      if(data.id)setState(s=>({...s,shootRecords:s.shootRecords.map(r=>r.id===data.id?data:r)}));
+      else setState(s=>({...s,shootRecords:[...s.shootRecords,{...data,id:genId()}]}));
+    }else{
+      if(data.id)setState(s=>({...s,buyRecords:s.buyRecords.map(r=>r.id===data.id?data:r)}));
+      else setState(s=>({...s,buyRecords:[...s.buyRecords,{...data,id:genId()}]}));
+    }
+    setModal(null);
+  }
+
+  function del(r){
+    if(!confirm('この記録を削除しますか？'))return;
+    if(r._type==='hunt')setState(s=>({...s,huntRecords:s.huntRecords.filter(x=>x.id!==r.id)}));
+    else if(r._type==='shoot')setState(s=>({...s,shootRecords:s.shootRecords.filter(x=>x.id!==r.id)}));
+    else setState(s=>({...s,buyRecords:s.buyRecords.filter(x=>x.id!==r.id)}));
+  }
+
+  const newHunt={_type:'hunt',date:today,purpose:'狩猟',target:'ニホンジカ',captureCount:1,gender:'雄',place:'',gunId:state.guns[0]?.id||'',ammoType:'散弾',ammoUsed:1,note:''};
+  const newShoot={_type:'shoot',date:today,rangeId:state.ranges[0]?.id||'',gunId:state.guns[0]?.id||'',ammoType:'散弾',ammoUsed:0,note:''};
+  const newBuy={_type:'buy',date:today,storeId:state.stores[0]?.id||'',ammoType:'散弾',qty:0,note:''};
+
+  const typeBadge={
+    hunt:'bg-green-100 text-green-800',
+    shoot:'bg-blue-100 text-blue-700',
+    buy:'bg-orange-100 text-orange-700',
+  };
+  const typeLabel={hunt:r=>r.purpose,shoot:()=>'試射',buy:()=>'購入'};
+  const borderColor={hunt:'border-l-green-600',shoot:'border-l-blue-500',buy:'border-l-orange-400'};
+
+  const stats={
+    hunt:state.huntRecords.filter(r=>!filterYear||r.date.startsWith(filterYear)).length,
+    shoot:state.shootRecords.filter(r=>!filterYear||r.date.startsWith(filterYear)).length,
+    buy:state.buyRecords.filter(r=>!filterYear||r.date.startsWith(filterYear)).length,
+  };
+
+  return(
+    <div className="p-4">
+      {/* フィルター */}
+      <div className="flex gap-2 mb-3">
+        <select value={filterYear} onChange={e=>setFY(e.target.value)} className="border rounded-lg px-2 py-1.5 text-sm bg-white flex-1">
+          <option value="">全年度</option>
+          {years.map(y=><option key={y} value={y}>{y}年</option>)}
+        </select>
+        <select value={filterType} onChange={e=>setFT(e.target.value)} className="border rounded-lg px-2 py-1.5 text-sm bg-white flex-1">
+          <option value="">全種別</option>
+          <option value="hunt">狩猟・有害駆除</option>
+          <option value="shoot">試射</option>
+          <option value="buy">購入</option>
+        </select>
+      </div>
+
+      {/* 追加ボタン */}
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        <button onClick={()=>setModal(newHunt)} className="py-2 bg-green-700 text-white rounded-xl text-xs font-bold active:bg-green-800">🦌 狩猟追加</button>
+        <button onClick={()=>setModal(newShoot)} className="py-2 bg-blue-600 text-white rounded-xl text-xs font-bold active:bg-blue-700">🎯 試射追加</button>
+        <button onClick={()=>setModal(newBuy)} className="py-2 bg-orange-500 text-white rounded-xl text-xs font-bold active:bg-orange-600">📦 購入追加</button>
+      </div>
+
+      {/* 件数 */}
+      <div className="flex gap-3 text-xs text-gray-400 mb-2">
+        <span>狩猟{stats.hunt}件</span>
+        <span>試射{stats.shoot}件</span>
+        <span>購入{stats.buy}件</span>
+        <span className="ml-auto">計{allRecs.length}件</span>
+      </div>
+
+      {/* 記録リスト */}
+      <div className="space-y-2">
+        {allRecs.map(r=>{
+          const gun=state.guns.find(g=>g.id===r.gunId);
+          const range=state.ranges.find(rg=>rg.id===r.rangeId);
+          const store=state.stores.find(s=>s.id===r.storeId);
+          return(
+            <div key={r.id} className={`bg-white rounded-xl p-3 border-l-4 border ${borderColor[r._type]}`}>
+              <div className="flex justify-between items-start gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <span className="font-bold text-sm">{r.date}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${typeBadge[r._type]}`}>{typeLabel[r._type](r)}</span>
+                  </div>
+                  {r._type==='hunt'&&<>
+                    <div className="text-sm text-gray-700">{r.target}　{r.captureCount}頭（{r.gender}）</div>
+                    <div className="text-sm text-gray-600">{r.ammoType}　{r.ammoUsed}発</div>
+                    <div className="text-xs text-gray-400 mt-0.5">{r.place}{gun&&'　銃:'+gun.number}</div>
+                  </>}
+                  {r._type==='shoot'&&<>
+                    <div className="text-sm text-gray-700">{range?.name||'—'}</div>
+                    <div className="text-sm text-gray-600">{gun?.number||'—'}　/ {r.ammoType}　{r.ammoUsed}発</div>
+                  </>}
+                  {r._type==='buy'&&<>
+                    <div className="text-sm text-gray-700">{store?.name||'—'}</div>
+                    <div className="text-sm text-gray-600">{r.ammoType}　+{r.qty}発</div>
+                  </>}
+                  {r.note&&<div className="text-xs text-gray-400 mt-0.5">備考: {r.note}</div>}
+                </div>
+                <div className="flex gap-3 shrink-0">
+                  <button onClick={()=>setModal({...r})} className="text-blue-600 text-xs">編集</button>
+                  <button onClick={()=>del(r)} className="text-red-500 text-xs">削除</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {allRecs.length===0&&<p className="text-center text-gray-400 py-10 text-sm">記録がありません</p>}
+      </div>
+
+      {modal&&modal._type==='hunt'&&(
+        <Modal title={modal.id?'狩猟記録を編集':'狩猟記録を追加'} onClose={()=>setModal(null)}>
+          <HuntForm init={modal} guns={state.guns} onSave={save} onCancel={()=>setModal(null)}/>
+        </Modal>
+      )}
+      {modal&&modal._type==='shoot'&&(
+        <Modal title={modal.id?'試射記録を編集':'試射記録を追加'} onClose={()=>setModal(null)}>
+          <ShootForm init={modal} guns={state.guns} ranges={state.ranges} onSave={save} onCancel={()=>setModal(null)}/>
+        </Modal>
+      )}
+      {modal&&modal._type==='buy'&&(
+        <Modal title={modal.id?'購入記録を編集':'購入記録を追加'} onClose={()=>setModal(null)}>
+          <BuyForm init={modal} stores={state.stores} onSave={save} onCancel={()=>setModal(null)}/>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────
 // PRINT TAB
 // ──────────────────────────────────────────
 function PrintTab({state}){
@@ -1046,38 +1200,54 @@ function PrintTab({state}){
           );
         })()}
 
-        {/* 全記録まとめ */}
+        {/* 全記録まとめ（残弾数付き） */}
         {printType==='all'&&(()=>{
-          const allRecs=[
-            ...hRecs.map(r=>({...r,_type:'hunt'})),
-            ...sRecs.map(r=>({...r,_type:'shoot'})),
-            ...bRecs.map(r=>({...r,_type:'buy'})),
+          // 日付順で全記録をソートし残弾数を計算
+          const base=[
+            ...state.huntRecords.filter(r=>!yearFilter||r.date.startsWith(yearFilter)).map(r=>({...r,_type:'hunt'})),
+            ...state.shootRecords.filter(r=>!yearFilter||r.date.startsWith(yearFilter)).map(r=>({...r,_type:'shoot'})),
+            ...state.buyRecords.filter(r=>!yearFilter||r.date.startsWith(yearFilter)).map(r=>({...r,_type:'buy'})),
           ].sort((a,b)=>a.date.localeCompare(b.date));
+
+          // 繰越から残弾数を積算
+          let bal={...state.carryOver};
+          AMMO_TYPES.forEach(t=>{bal[t]=Number(bal[t])||0;});
+          const allRecs=base.map(r=>{
+            if(r._type==='buy') bal={...bal,[r.ammoType]:(bal[r.ammoType]||0)+(Number(r.qty)||0)};
+            else bal={...bal,[r.ammoType]:(bal[r.ammoType]||0)-(Number(r.ammoUsed)||0)};
+            return{...r,_bal:{...bal}};
+          });
+
+          const hdrs=['日付','区分','獲物','数','雌雄','場所','使用銃','弾種','±発数','散弾残','単12残','単20残','備考'];
+          const invCls=(n)=>n<=0?tdCls+' text-red-600 font-bold':n<=20?tdCls+' text-yellow-600 font-bold':tdCls;
+
           return chunk(allRecs,20).length===0
             ?<p className="text-sm text-gray-400 text-center py-4">記録がありません</p>
             :chunk(allRecs,20).map((pg,pi)=>(
               <div key={pi} className={pi>0?'print-page mt-4':''}>
-                {pi===0&&<div className="font-bold mb-2 border-b pb-1">■ 全使用記録</div>}
+                {pi===0&&<div className="font-bold mb-2 border-b pb-1">■ 全使用記録（残弾数付き）</div>}
                 {pi>0&&<div className="font-bold mb-2 border-b pb-1">■ 全使用記録（続き {pi+1}ページ）</div>}
                 <table className="w-full border-collapse text-xs">
                   <thead>
-                    <tr>{['日付','区分','獲物','捕獲数','雌雄','場所','使用銃','弾種','発数','備考'].map(h=>(
-                      <th key={h} className={thCls}>{h}</th>
-                    ))}</tr>
+                    <tr>{hdrs.map(h=><th key={h} className={thCls}>{h}</th>)}</tr>
                   </thead>
                   <tbody>
                     {pg.map(r=>{
+                      const b=r._bal;
                       if(r._type==='hunt') return(
                         <tr key={r.id}>
                           <td className={tdCls}>{r.date}</td>
                           <td className={tdCls}>{r.purpose}</td>
                           <td className={tdCls}>{r.target}</td>
-                          <td className={tdCls+' text-center'}>{r.captureCount}</td>
+                          <td className={tdCls+' text-center'}>{r.captureCount}{r.gender}</td>
                           <td className={tdCls+' text-center'}>{r.gender}</td>
                           <td className={tdCls}>{r.place}</td>
                           <td className={tdCls}>{gunName(r.gunId)}</td>
                           <td className={tdCls}>{r.ammoType}</td>
-                          <td className={tdCls+' text-center'}>{r.ammoUsed}</td>
+                          <td className={tdCls+' text-center text-red-600'}>-{r.ammoUsed}</td>
+                          <td className={invCls(b['散弾'])}>{b['散弾']}</td>
+                          <td className={invCls(b['単弾12番'])}>{b['単弾12番']}</td>
+                          <td className={invCls(b['単弾20番'])}>{b['単弾20番']}</td>
                           <td className={tdCls}>{r.note}</td>
                         </tr>
                       );
@@ -1091,7 +1261,10 @@ function PrintTab({state}){
                           <td className={tdCls}>{rangeName(r.rangeId)}</td>
                           <td className={tdCls}>{gunName(r.gunId)}</td>
                           <td className={tdCls}>{r.ammoType}</td>
-                          <td className={tdCls+' text-center'}>{r.ammoUsed}</td>
+                          <td className={tdCls+' text-center text-red-600'}>-{r.ammoUsed}</td>
+                          <td className={invCls(b['散弾'])}>{b['散弾']}</td>
+                          <td className={invCls(b['単弾12番'])}>{b['単弾12番']}</td>
+                          <td className={invCls(b['単弾20番'])}>{b['単弾20番']}</td>
                           <td className={tdCls}>{r.note}</td>
                         </tr>
                       );
@@ -1106,6 +1279,9 @@ function PrintTab({state}){
                           <td className={tdCls}></td>
                           <td className={tdCls}>{r.ammoType}</td>
                           <td className={tdCls+' text-center text-green-700 font-bold'}>+{r.qty}</td>
+                          <td className={invCls(b['散弾'])}>{b['散弾']}</td>
+                          <td className={invCls(b['単弾12番'])}>{b['単弾12番']}</td>
+                          <td className={invCls(b['単弾20番'])}>{b['単弾20番']}</td>
                           <td className={tdCls}>{r.note}</td>
                         </tr>
                       );
@@ -1290,13 +1466,11 @@ function App(){
   }
 
   const TABS=[
-    {id:'home',  label:'ホーム',  icon:'🏠'},
+    {id:'home',    label:'ホーム',  icon:'🏠'},
     {id:'personal',label:'個人情報',icon:'👤'},
-    {id:'hunting',label:'狩猟記録',icon:'🦌'},
-    {id:'shooting',label:'試射記録',icon:'🎯'},
-    {id:'purchase',label:'購入記録',icon:'📦'},
+    {id:'records', label:'記録',    icon:'📋'},
     {id:'inventory',label:'在庫管理',icon:'📊'},
-    {id:'print',  label:'印刷',   icon:'🖨️'},
+    {id:'print',   label:'印刷',   icon:'🖨️'},
   ];
 
   return(
@@ -1316,9 +1490,7 @@ function App(){
       <main className="flex-1 overflow-y-auto pb-20 no-print">
         {tab==='home'     &&<HomeTab state={state}/>}
         {tab==='personal' &&<PersonalInfoTab state={state} setState={setState}/>}
-        {tab==='hunting'  &&<HuntingTab state={state} setState={setState}/>}
-        {tab==='shooting' &&<TestShootingTab state={state} setState={setState}/>}
-        {tab==='purchase' &&<PurchaseTab state={state} setState={setState}/>}
+        {tab==='records'  &&<RecordTab state={state} setState={setState}/>}
         {tab==='inventory'&&<InventoryTab state={state} setState={setState}/>}
         {tab==='print'    &&<PrintTab state={state}/>}
       </main>
