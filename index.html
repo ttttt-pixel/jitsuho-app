@@ -47,11 +47,22 @@ function mergeState(p){
   return{...DEFAULT,...p,carryOver:{...DEFAULT.carryOver,...(p.carryOver||{})}};
 }
 
+function migrateRecords(state){
+  // location+meshNumber → place への移行
+  const huntRecords=(state.huntRecords||[]).map(r=>{
+    if('place' in r)return r;
+    const place=[r.location,r.meshNumber].filter(Boolean).join(' ');
+    const {location,meshNumber,...rest}=r;
+    return{...rest,place};
+  });
+  return{...state,huntRecords};
+}
+
 function loadFromLS(){
   try{
     const s=localStorage.getItem(STORAGE_KEY);
     if(!s)return DEFAULT;
-    return mergeState(JSON.parse(s));
+    return migrateRecords(mergeState(JSON.parse(s)));
   }catch{return DEFAULT;}
 }
 
@@ -97,8 +108,8 @@ function toCsv(state){
     ...state.stores.map(s=>csvRow([s.id,s.name,s.address||''])),
     '',
     '##HUNT_RECORDS',
-    csvRow(['id','date','purpose','target','captureCount','gender','location','meshNumber','gunId','ammoType','ammoUsed','note']),
-    ...state.huntRecords.map(r=>csvRow([r.id,r.date,r.purpose,r.target,r.captureCount,r.gender,r.location,r.meshNumber,r.gunId||'',r.ammoType,r.ammoUsed,r.note||''])),
+    csvRow(['id','date','purpose','target','captureCount','gender','place','gunId','ammoType','ammoUsed','note']),
+    ...state.huntRecords.map(r=>csvRow([r.id,r.date,r.purpose,r.target,r.captureCount,r.gender,r.place||'',r.gunId||'',r.ammoType,r.ammoUsed,r.note||''])),
     '',
     '##SHOOT_RECORDS',
     csvRow(['id','date','rangeId','gunId','ammoType','ammoUsed','note']),
@@ -153,6 +164,9 @@ function fromCsv(text){
   if(sections.STORES?.rows)st.stores=sections.STORES.rows.map(r=>obj('STORES',r));
   if(sections.HUNT_RECORDS?.rows)st.huntRecords=sections.HUNT_RECORDS.rows.map(r=>{
     const o=obj('HUNT_RECORDS',r);
+    // 旧フォーマット(location+meshNumber)からの移行
+    if(!('place' in o)) o.place=[o.location,o.meshNumber].filter(Boolean).join(' ');
+    delete o.location; delete o.meshNumber;
     return{...o,captureCount:Number(o.captureCount)||0,ammoUsed:Number(o.ammoUsed)||0};
   });
   if(sections.SHOOT_RECORDS?.rows)st.shootRecords=sections.SHOOT_RECORDS.rows.map(r=>{
@@ -351,7 +365,7 @@ function HomeTab({state}){
                     <span className={`text-xs px-2 py-0.5 rounded-full ${r.purpose==='狩猟'?'bg-green-100 text-green-700':'bg-orange-100 text-orange-700'}`}>{r.purpose}</span>
                   </div>
                   <div className="text-gray-700">{r.target} {r.captureCount}頭（{r.gender}）</div>
-                  <div className="text-gray-500 text-xs">{r.ammoType} {r.ammoUsed}発 / {r.location} {r.meshNumber}</div>
+                  <div className="text-gray-500 text-xs">{r.ammoType} {r.ammoUsed}発 / {r.place}</div>
                   {gun&&<div className="text-gray-400 text-xs">銃: {gun.number}</div>}
                 </div>
               );
@@ -579,7 +593,7 @@ function HuntingTab({state,setState}){
     .sort((a,b)=>b.date.localeCompare(a.date));
 
   const today=new Date().toISOString().split('T')[0];
-  const newRec={date:today,purpose:'狩猟',target:'ニホンジカ',captureCount:1,gender:'雄',location:'',meshNumber:'',gunId:state.guns[0]?.id||'',ammoType:'散弾',ammoUsed:1,note:''};
+  const newRec={date:today,purpose:'狩猟',target:'ニホンジカ',captureCount:1,gender:'雄',place:'',gunId:state.guns[0]?.id||'',ammoType:'散弾',ammoUsed:1,note:''};
 
   function save(rec){
     if(rec.id) setState(s=>({...s,huntRecords:s.huntRecords.map(r=>r.id===rec.id?rec:r)}));
@@ -617,7 +631,7 @@ function HuntingTab({state,setState}){
                   </div>
                   <div className="text-sm text-gray-700">{r.target}　{r.captureCount}頭（{r.gender}）</div>
                   <div className="text-sm text-gray-600">{r.ammoType}　{r.ammoUsed}発</div>
-                  <div className="text-xs text-gray-400 mt-0.5">{r.location}{r.meshNumber&&'　'+r.meshNumber}{gun&&'　銃:'+gun.number}</div>
+                  <div className="text-xs text-gray-400 mt-0.5">{r.place}{gun&&'　銃:'+gun.number}</div>
                   {r.note&&<div className="text-xs text-gray-400 mt-0.5">備考: {r.note}</div>}
                 </div>
                 <div className="flex gap-3 shrink-0">
@@ -652,8 +666,7 @@ function HuntForm({init,guns,onSave,onCancel}){
         <Inp label="捕獲数（頭）" type="number" min="0" value={f.captureCount} onChange={u('captureCount')}/>
         <Sel label="雌雄" value={f.gender} options={GENDERS} onChange={u('gender')}/>
       </div>
-      <Inp label="猟場名" value={f.location} onChange={u('location')} placeholder="○○猟区"/>
-      <Inp label="メッシュ番号" value={f.meshNumber} onChange={u('meshNumber')} placeholder="ホ703" hint="カタカナ1文字＋数字3桁"/>
+      <Inp label="場所" value={f.place||''} onChange={u('place')} placeholder="○○猟区 ホ703"/>
       <Sel label="使用銃" value={f.gunId} onChange={u('gunId')}
         options={[{value:'',label:'—未選択—'},...guns.map(g=>({value:g.id,label:g.number}))]}/>
       <Sel label="弾種" value={f.ammoType} options={AMMO_TYPES} onChange={u('ammoType')}/>
@@ -967,6 +980,7 @@ function PrintTab({state}){
       <div className="no-print p-4 space-y-3 bg-white border-b">
         <div className="grid grid-cols-2 gap-2">
           <select value={printType} onChange={e=>setPT(e.target.value)} className="border rounded-lg px-3 py-2 text-sm bg-white">
+            <option value="all">全記録（まとめ）</option>
             <option value="hunting">狩猟記録</option>
             <option value="shooting">試射記録</option>
             <option value="purchase">購入記録</option>
@@ -997,21 +1011,125 @@ function PrintTab({state}){
           {yearFilter&&<div className="text-sm">{yearFilter}年度</div>}
         </div>
 
-        {/* Hunting */}
+        {/* 在庫サマリー：常時表示 */}
+        {(()=>{
+          const inv=calcInv(state);
+          return(
+            <div className="mb-4 border rounded-lg overflow-hidden">
+              <div className="bg-gray-100 font-bold text-xs px-2 py-1 border-b">■ 自宅在庫数</div>
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr>{['弾種','繰越','購入計','狩猟消費','試射消費','現在庫','状態'].map(h=><th key={h} className={thCls}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {AMMO_TYPES.map(t=>{
+                    const carry=state.carryOver[t]||0;
+                    const b=state.buyRecords.filter(r=>r.ammoType===t).reduce((s,r)=>s+(Number(r.qty)||0),0);
+                    const h=state.huntRecords.filter(r=>r.ammoType===t).reduce((s,r)=>s+(Number(r.ammoUsed)||0),0);
+                    const sh=state.shootRecords.filter(r=>r.ammoType===t).reduce((s,r)=>s+(Number(r.ammoUsed)||0),0);
+                    const cur=inv[t];
+                    return(
+                      <tr key={t} className={cur<=0?'bg-red-50':cur<=20?'bg-yellow-50':''}>
+                        <td className={tdCls+' font-bold'}>{t}</td>
+                        <td className={tdCls+' text-center'}>{carry}</td>
+                        <td className={tdCls+' text-center'}>{b}</td>
+                        <td className={tdCls+' text-center'}>{h}</td>
+                        <td className={tdCls+' text-center'}>{sh}</td>
+                        <td className={tdCls+' text-center font-bold'}>{cur}</td>
+                        <td className={tdCls+' text-center'}>{cur<=0?'🔴在庫切れ':cur<=20?'🟡残りわずか':'🟢正常'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
+
+        {/* 全記録まとめ */}
+        {printType==='all'&&(()=>{
+          const allRecs=[
+            ...hRecs.map(r=>({...r,_type:'hunt'})),
+            ...sRecs.map(r=>({...r,_type:'shoot'})),
+            ...bRecs.map(r=>({...r,_type:'buy'})),
+          ].sort((a,b)=>a.date.localeCompare(b.date));
+          return chunk(allRecs,20).length===0
+            ?<p className="text-sm text-gray-400 text-center py-4">記録がありません</p>
+            :chunk(allRecs,20).map((pg,pi)=>(
+              <div key={pi} className={pi>0?'print-page mt-4':''}>
+                {pi===0&&<div className="font-bold mb-2 border-b pb-1">■ 全使用記録</div>}
+                {pi>0&&<div className="font-bold mb-2 border-b pb-1">■ 全使用記録（続き {pi+1}ページ）</div>}
+                <table className="w-full border-collapse text-xs">
+                  <thead>
+                    <tr>{['日付','区分','獲物','捕獲数','雌雄','場所','使用銃','弾種','発数','備考'].map(h=>(
+                      <th key={h} className={thCls}>{h}</th>
+                    ))}</tr>
+                  </thead>
+                  <tbody>
+                    {pg.map(r=>{
+                      if(r._type==='hunt') return(
+                        <tr key={r.id}>
+                          <td className={tdCls}>{r.date}</td>
+                          <td className={tdCls}>{r.purpose}</td>
+                          <td className={tdCls}>{r.target}</td>
+                          <td className={tdCls+' text-center'}>{r.captureCount}</td>
+                          <td className={tdCls+' text-center'}>{r.gender}</td>
+                          <td className={tdCls}>{r.place}</td>
+                          <td className={tdCls}>{gunName(r.gunId)}</td>
+                          <td className={tdCls}>{r.ammoType}</td>
+                          <td className={tdCls+' text-center'}>{r.ammoUsed}</td>
+                          <td className={tdCls}>{r.note}</td>
+                        </tr>
+                      );
+                      if(r._type==='shoot') return(
+                        <tr key={r.id} className="bg-blue-50">
+                          <td className={tdCls}>{r.date}</td>
+                          <td className={tdCls}>試射</td>
+                          <td className={tdCls}></td>
+                          <td className={tdCls}></td>
+                          <td className={tdCls}></td>
+                          <td className={tdCls}>{rangeName(r.rangeId)}</td>
+                          <td className={tdCls}>{gunName(r.gunId)}</td>
+                          <td className={tdCls}>{r.ammoType}</td>
+                          <td className={tdCls+' text-center'}>{r.ammoUsed}</td>
+                          <td className={tdCls}>{r.note}</td>
+                        </tr>
+                      );
+                      return(
+                        <tr key={r.id} className="bg-green-50">
+                          <td className={tdCls}>{r.date}</td>
+                          <td className={tdCls}>購入</td>
+                          <td className={tdCls}></td>
+                          <td className={tdCls}></td>
+                          <td className={tdCls}></td>
+                          <td className={tdCls}>{storeName(r.storeId)}</td>
+                          <td className={tdCls}></td>
+                          <td className={tdCls}>{r.ammoType}</td>
+                          <td className={tdCls+' text-center text-green-700 font-bold'}>+{r.qty}</td>
+                          <td className={tdCls}>{r.note}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div className="text-right text-xs text-gray-400 mt-1">{pi+1}/{chunk(allRecs,20).length}ページ　合計{allRecs.length}件</div>
+              </div>
+            ));
+        })()}
+
+        {/* 狩猟記録 */}
         {printType==='hunting'&&(
           chunk(hRecs,20).length===0
             ?<p className="text-sm text-gray-400 text-center py-4">記録がありません</p>
             :chunk(hRecs,20).map((pg,pi)=>(
               <div key={pi} className={pi>0?'print-page mt-4':''}>
-                {pi>0&&<div className="text-lg font-bold text-center mb-2">狩猟記録（続き {pi+1}ページ）</div>}
                 {pi===0&&<div className="font-bold mb-2 border-b pb-1">■ 狩猟・有害鳥獣駆除記録</div>}
+                {pi>0&&<div className="font-bold mb-2 border-b pb-1">■ 狩猟記録（続き {pi+1}ページ）</div>}
                 <table className="w-full border-collapse text-xs">
                   <thead>
-                    <tr>
-                      {['日付','目的','獲物','捕獲数','雌雄','猟場名','メッシュ','使用銃','弾種','使用数','備考'].map(h=>(
-                        <th key={h} className={thCls}>{h}</th>
-                      ))}
-                    </tr>
+                    <tr>{['日付','目的','獲物','捕獲数','雌雄','場所','使用銃','弾種','使用数','備考'].map(h=>(
+                      <th key={h} className={thCls}>{h}</th>
+                    ))}</tr>
                   </thead>
                   <tbody>
                     {pg.map(r=>(
@@ -1021,8 +1139,7 @@ function PrintTab({state}){
                         <td className={tdCls}>{r.target}</td>
                         <td className={tdCls+' text-center'}>{r.captureCount}</td>
                         <td className={tdCls+' text-center'}>{r.gender}</td>
-                        <td className={tdCls}>{r.location}</td>
-                        <td className={tdCls}>{r.meshNumber}</td>
+                        <td className={tdCls}>{r.place}</td>
                         <td className={tdCls}>{gunName(r.gunId)}</td>
                         <td className={tdCls}>{r.ammoType}</td>
                         <td className={tdCls+' text-center'}>{r.ammoUsed}</td>
@@ -1036,7 +1153,7 @@ function PrintTab({state}){
             ))
         )}
 
-        {/* Test Shooting */}
+        {/* 試射記録 */}
         {printType==='shooting'&&(
           <div>
             <div className="font-bold mb-2 border-b pb-1">■ 試射記録</div>
@@ -1063,7 +1180,7 @@ function PrintTab({state}){
           </div>
         )}
 
-        {/* Purchase */}
+        {/* 購入記録 */}
         {printType==='purchase'&&(
           <div>
             <div className="font-bold mb-2 border-b pb-1">■ 購入（交付・補充）記録</div>
@@ -1089,10 +1206,10 @@ function PrintTab({state}){
           </div>
         )}
 
-        {/* Inventory */}
+        {/* 在庫管理 */}
         {printType==='inventory'&&(
           <div>
-            <div className="font-bold mb-2 border-b pb-1">■ 在庫管理表</div>
+            <div className="font-bold mb-2 border-b pb-1">■ 在庫管理表（詳細）</div>
             <table className="w-full border-collapse text-xs">
               <thead>
                 <tr>{['弾種','繰越在庫','購入合計','狩猟消費','試射消費','現在庫','状態'].map(h=><th key={h} className={thCls}>{h}</th>)}</tr>
